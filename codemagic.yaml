@@ -1,0 +1,114 @@
+workflows:
+  android-apk:
+    name: Kibo Admin - Android APK
+    instance_type: linux_x2
+    max_build_duration: 30
+    environment:
+      flutter: stable
+      java: 17
+    scripts:
+      - name: Prepare platforms (project files, permissions)
+        script: bash tool/prepare.sh
+      - name: Get packages
+        script: flutter pub get
+      - name: Analyze (informational)
+        script: flutter analyze || true
+      - name: Build release APK
+        script: flutter build apk --release
+    artifacts:
+      - build/app/outputs/flutter-apk/*.apk
+      - pubspec.lock
+
+  ios-ipa-altstore:
+    name: Kibo Admin - iOS IPA (unsigned, for AltStore/AltServer)
+    instance_type: mac_mini_m2
+    max_build_duration: 45
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Prepare platforms (project files, permissions)
+        script: bash tool/prepare.sh
+      - name: Get packages
+        script: flutter pub get
+      - name: Generate iOS config and Podfile (no build yet)
+        script: flutter build ios --config-only --release --no-codesign || true
+      - name: Disable code signing for app and pods
+        script: bash tool/patch_ios_nosign.sh
+      - name: Analyze (informational)
+        script: flutter analyze || true
+      - name: Build with xcodebuild directly (signing disabled)
+        script: |
+          set -uo pipefail
+          mkdir -p build
+          if ! xcodebuild -workspace ios/Runner.xcworkspace -scheme Runner -configuration Release \
+              -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build/ios_derived \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
+              build > build/xcodebuild.log 2>&1; then
+            echo "=============== REAL XCODE ERRORS ==============="
+            grep -nE "error:|requires a development team|Signing for|Code Sign" build/xcodebuild.log | head -40
+            echo "=============== LAST 60 LINES ==============="
+            tail -n 60 build/xcodebuild.log
+            exit 1
+          fi
+          tail -n 5 build/xcodebuild.log
+      - name: Package unsigned IPA
+        script: |
+          APP=build/ios_derived/Build/Products/Release-iphoneos/Runner.app
+          test -d "$APP" || { echo "Runner.app not found"; find build/ios_derived -name "*.app" -maxdepth 6; exit 1; }
+          rm -rf build/Payload && mkdir -p build/Payload
+          cp -R "$APP" build/Payload/
+          (cd build && zip -qry KiboAdmin-unsigned.ipa Payload)
+          ls -lh build/KiboAdmin-unsigned.ipa
+    artifacts:
+      - build/KiboAdmin-unsigned.ipa
+      - build/xcodebuild.log
+      - pubspec.lock
+
+  macos-app:
+    name: Kibo Admin - macOS app
+    instance_type: mac_mini_m2
+    max_build_duration: 45
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Prepare macOS project
+        script: bash tool/prepare_macos.sh
+      - name: Get packages
+        script: flutter pub get
+      - name: Generate Podfile (no build yet)
+        script: flutter build macos --config-only --release || true
+      - name: Patch pod signing
+        script: bash tool/patch_macos_pods.sh
+      - name: Build macOS app
+        script: flutter build macos --release
+      - name: Zip the app
+        script: |
+          cd build/macos/Build/Products/Release
+          APP=$(ls -d *.app | head -1)
+          ditto -c -k --keepParent "$APP" "$CM_BUILD_DIR/build/KiboAdmin-macos.zip"
+    artifacts:
+      - build/KiboAdmin-macos.zip
+      - pubspec.lock
+
+  windows-app:
+    name: Kibo Admin - Windows app
+    instance_type: windows_x2
+    max_build_duration: 45
+    environment:
+      flutter: stable
+    scripts:
+      - name: Prepare Windows project
+        script: powershell -ExecutionPolicy Bypass -File tool/prepare_windows.ps1
+      - name: Get packages
+        script: flutter pub get
+      - name: Build Windows app
+        script: flutter build windows --release
+      - name: Zip the app
+        script: powershell -Command "Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath build\KiboAdmin-windows.zip -Force"
+    artifacts:
+      - build/KiboAdmin-windows.zip
+      - pubspec.lock
